@@ -9,7 +9,6 @@
 using namespace sf;
 using namespace std;
 
-
 class RouteNode
 {
 public:
@@ -180,6 +179,8 @@ public:
     }
 };
 
+
+
 class Maps
 {
 public:
@@ -219,6 +220,45 @@ public:
         ports[s].routeHead = newroute;
     }
 
+    string normalizeDate(string date) {
+        if (date.length() == 10 && date[2] == '/' && date[5] == '/') {
+            return date;
+        }
+        
+        size_t firstSlash = date.find('/');
+        size_t secondSlash = date.find('/', firstSlash + 1);
+        
+        if (firstSlash != string::npos && secondSlash != string::npos) {
+            string dayStr = date.substr(0, firstSlash);
+            string monthStr = date.substr(firstSlash + 1, secondSlash - firstSlash - 1);
+            string yearStr = date.substr(secondSlash + 1);
+            
+            if (dayStr.length() == 1) dayStr = "0" + dayStr;
+            if (monthStr.length() == 1) monthStr = "0" + monthStr;
+            
+            return dayStr + "/" + monthStr + "/" + yearStr;
+        }
+        
+        return date;
+    }
+
+    bool isDateGreaterOrEqual(string date1, string date2) {
+        string normDate1 = normalizeDate(date1);
+        string normDate2 = normalizeDate(date2);
+        
+        int day1 = stoi(normDate1.substr(0, 2));
+        int month1 = stoi(normDate1.substr(3, 2));
+        int year1 = stoi(normDate1.substr(6, 4));
+        
+        int day2 = stoi(normDate2.substr(0, 2));
+        int month2 = stoi(normDate2.substr(3, 2));
+        int year2 = stoi(normDate2.substr(6, 4));
+        
+        if (year1 != year2) return year1 > year2;
+        if (month1 != month2) return month1 > month2;
+        return day1 >= day2;
+    }
+
     bool checkDirectRoutes(string origin, string des, string date, Vector<int>& path)
     {
         int originindex = findPortIndex(origin);
@@ -230,7 +270,7 @@ public:
         
         RouteNode *temp = ports[originindex].routeHead;
         while (temp != nullptr){
-            if (temp->destinationPort == des && temp->departureDate == date){
+            if (temp->destinationPort == des && isDateGreaterOrEqual(temp->departureDate, date)){
                 path.push_back(originindex);
                 path.push_back(desindex);
                 return true;
@@ -240,7 +280,7 @@ public:
         return false;
     }
 
-bool checkConnectingRoutes(string origin, string dest, string date, Vector<int>& path) {
+   bool checkConnectingRoutes(string origin, string dest, string date, Vector<int>& path, Vector<string>& waitPorts, Vector<string>& waitDurations) {
     const int MIN_DOCKING_DELAY = 120; 
 
     auto convertToMinutes = [](string t) {
@@ -249,20 +289,55 @@ bool checkConnectingRoutes(string origin, string dest, string date, Vector<int>&
         return h * 60 + m;
     };
 
+    auto formatWaitTime = [](int minutes) {
+        if (minutes >= 1440) {
+            int days = minutes / 1440;
+            int hours = (minutes % 1440) / 60;
+            return to_string(days) + "d " + to_string(hours) + "h";
+        } else {
+            int hours = minutes / 60;
+            int mins = minutes % 60;
+            return to_string(hours) + "h " + to_string(mins) + "m";
+        }
+    };
+
+    auto calculateDaysBetween = [](string date1, string date2) {
+        int day1 = stoi(date1.substr(0, 2));
+        int month1 = stoi(date1.substr(3, 2));
+        int year1 = stoi(date1.substr(6, 4));
+        
+        int day2 = stoi(date2.substr(0, 2));
+        int month2 = stoi(date2.substr(3, 2));
+        int year2 = stoi(date2.substr(6, 4));
+    
+        int totalDays1 = year1 * 365 + month1 * 30 + day1;
+        int totalDays2 = year2 * 365 + month2 * 30 + day2;
+        return totalDays2 - totalDays1;
+    };
+
     int org_index = findPortIndex(origin);
     int des_index = findPortIndex(dest);
     if (org_index == -1 || des_index == -1) return false;
 
     Queue q;
-    Vector<int> startPath;
-    startPath.push_back(org_index);
+    PathWithDate startPath;
+    startPath.path.push_back(org_index);
+    startPath.currentDate = date;
+    startPath.currentTime = "00:00";
+    startPath.waitPorts = Vector<string>();
+    startPath.waitDurations = Vector<string>();
     q.enqueue(startPath);
 
     bool found = false;
 
     while (!q.isEmpty() && !found) {
-        Vector<int> currentPath = q.frontfind();
-        q.dequeue();
+        PathWithDate currentPathWithDate = q.dequeue();
+        Vector<int> currentPath = currentPathWithDate.path;
+        string currentDate = currentPathWithDate.currentDate;
+        string currentTime = currentPathWithDate.currentTime;
+        Vector<string> currentWaitPorts = currentPathWithDate.waitPorts;
+        Vector<string> currentWaitDurations = currentPathWithDate.waitDurations;
+        
         int currentPort = currentPath[currentPath.getSize() - 1]; 
 
         RouteNode* route = ports[currentPort].routeHead;
@@ -273,29 +348,73 @@ bool checkConnectingRoutes(string origin, string dest, string date, Vector<int>&
                 continue;
             }
 
-            if (currentPath.getSize() == 1 && route->departureDate != date) {
+            bool alreadyVisited = false;
+            for (int i = 0; i < currentPath.getSize(); i++) {
+                if (currentPath[i] == nextIndex) {
+                    alreadyVisited = true;
+                    break;
+                }
+            }
+            if (alreadyVisited) {
                 route = route->next;
                 continue;
             }
 
-            if (currentPath.getSize() > 1) {
-                int prevArrival = convertToMinutes(route->arrivalTime); 
-                int nextDeparture = convertToMinutes(route->departureTime); 
-                if (nextDeparture < prevArrival + MIN_DOCKING_DELAY) {
+        if (!isDateGreaterOrEqual(route->departureDate, currentDate)) {
+                route = route->next;
+                continue;
+            }
+
+            int waitMinutes = 0;
+            bool hasWait = false;
+            
+            if (route->departureDate == currentDate) {
+                int departureMinutes = convertToMinutes(route->departureTime);
+                int currentMinutes = convertToMinutes(currentTime);
+                
+                if (departureMinutes >= currentMinutes + MIN_DOCKING_DELAY) {
+                    waitMinutes = departureMinutes - currentMinutes;
+                    hasWait = true;
+                } else {
                     route = route->next;
                     continue;
                 }
+            } else {
+                int daysBetween = calculateDaysBetween(currentDate, route->departureDate);
+                waitMinutes = daysBetween * 1440; 
+                hasWait = true;
+                
+                if (daysBetween == 0) {
+                    int departureMinutes = convertToMinutes(route->departureTime);
+                    int currentMinutes = convertToMinutes(currentTime);
+                    waitMinutes = (24 * 60 - currentMinutes) + departureMinutes;
+                }
             }
 
-            Vector<int> newPath = currentPath;
-            newPath.push_back(nextIndex);
+            PathWithDate newPathWithDate;
+            newPathWithDate.path = currentPath;
+            newPathWithDate.path.push_back(nextIndex);
+            newPathWithDate.currentDate = route->departureDate;
+            newPathWithDate.currentTime = route->departureTime;
+            
+            newPathWithDate.waitPorts = currentWaitPorts;
+            newPathWithDate.waitDurations = currentWaitDurations;
+            
+            if (hasWait && currentPath.getSize() > 0) {
+                string waitPortName = portLocations[currentPort].name;
+                string waitDuration = formatWaitTime(waitMinutes);
+                newPathWithDate.waitPorts.push_back(waitPortName);
+                newPathWithDate.waitDurations.push_back(waitDuration);
+            }
 
             if (nextIndex == des_index) {
-                path = newPath;
+                path = newPathWithDate.path;
+                waitPorts = newPathWithDate.waitPorts;
+                waitDurations = newPathWithDate.waitDurations;
                 found = true;
                 break;
             } else {
-                q.enqueue(newPath);
+                q.enqueue(newPathWithDate);
             }
 
             route = route->next;
@@ -304,8 +423,6 @@ bool checkConnectingRoutes(string origin, string dest, string date, Vector<int>&
 
     return found;
 }
-
-
 
     int findPortLocationIndex(const string& portName) {
         for (int i = 0; i < numLocations; i++) {
@@ -316,29 +433,244 @@ bool checkConnectingRoutes(string origin, string dest, string date, Vector<int>&
         return -1;
     }
 
-bool findAndDisplayRoute(Maps &graph, string origin, string destination, string date, Vector<int>& currentPath, string& resultText, Color& resultColor) {
+    bool findAndDisplayRoute(string origin, string destination, string date, 
+                        Vector<int>& currentPath, Vector<string>& waitPorts, 
+                        Vector<string>& waitDurations, string& resultText, Color& resultColor, string& errorDetails) {
     currentPath.clear();
+    waitPorts.clear();
+    waitDurations.clear();
+    errorDetails = "";
     
-    bool directFound = graph.checkDirectRoutes(origin, destination, date, currentPath);
-    if (directFound) {
+    if (origin.empty() || destination.empty() || date.empty()) {
+        resultText = "Input Error!";
+        resultColor = Color::Red;
+        errorDetails = "Please fill all fields: Departure Port, Destination Port, and Date.";
+        return false;
+    }
+    
+    int originIndex = findPortIndex(origin);
+    int destIndex = findPortIndex(destination);
+    
+    if (originIndex == -1 && destIndex == -1) {
+        resultText = "Port Error!";
+        resultColor = Color::Red;
+        errorDetails = "Both ports not found: '" + origin + "' and '" + destination + "'";
+        return false;
+    }
+    else if (originIndex == -1) {
+        resultText = "Port Error!";
+        resultColor = Color::Red;
+        errorDetails = "Departure port not found: '" + origin + "'";
+        return false;
+    }
+    else if (destIndex == -1) {
+        resultText = "Port Error!";
+        resultColor = Color::Red;
+        errorDetails = "Destination port not found: '" + destination + "'";
+        return false;
+    }
+    
+    string normalizedDate = normalizeDate(date);
+    
+    if (normalizedDate.length() != 10 || normalizedDate[2] != '/' || normalizedDate[5] != '/') {
+        resultText = "Date Format Error!";
+        resultColor = Color::Red;
+        errorDetails = "Invalid date format. Please use D/M/YYYY or DD/MM/YYYY (e.g., 9/12/2024 or 09/12/2024)";
+        return false;
+    }
+    
+    try {
+        int day = stoi(normalizedDate.substr(0, 2));
+        int month = stoi(normalizedDate.substr(3, 2));
+        int year = stoi(normalizedDate.substr(6, 4));
+        
+        if (day < 1 || day > 31 || month < 1 || month > 12 || year < 2024) {
+            resultText = "Date Error!";
+            resultColor = Color::Red;
+            errorDetails = "Invalid date. Please check day (1-31), month (1-12), and year (>=2024)";
+            return false;
+        }
+    }
+    catch (...) {
+        resultText = "Date Error!";
+        resultColor = Color::Red;
+        errorDetails = "Invalid date format. Please use numbers for day, month, and year.";
+        return false;
+    }
+    
+    Vector<int> directPath;
+    
+    bool directFound = checkDirectRoutes(origin, destination, normalizedDate, directPath);
+    bool connectingFound = checkConnectingRoutes(origin, destination, normalizedDate, currentPath, waitPorts, waitDurations);
+    if (directFound && connectingFound) {
+        resultText = "Both direct and connecting routes found!";
+        resultColor = Color::Green;
+        errorDetails = "Showing connecting route with " + to_string(waitPorts.getSize()) + " wait points.";
+        return true;
+    }
+    else if (directFound) {
+        currentPath = directPath;
         resultText = "Direct route found!";
         resultColor = Color::Green;
+        errorDetails = "Direct connection available. No intermediate stops.";
         return true;
     }
-    
-    bool connectingFound = graph.checkConnectingRoutes(origin, destination, date, currentPath);
-    if (connectingFound) {
+    else if (connectingFound) {
         resultText = "Connecting route found!";
         resultColor = Color::Green;
+        errorDetails = "Route with " + to_string(currentPath.getSize()-2) + " intermediate stops and " + 
+                      to_string(waitPorts.getSize()) + " wait points.";
         return true;
     }
-    
-    resultText = "No route found!";
-    resultColor = Color::Red;
-    return false;
+    else {
+        resultText = "No route found!";
+        resultColor = Color::Red;
+        
+        RouteNode* routesFromOrigin = ports[originIndex].routeHead;
+        bool hasRoutesFromOrigin = (routesFromOrigin != nullptr);
+        
+        if (!hasRoutesFromOrigin) {
+            errorDetails = "No routes available from " + origin + " on " + date;
+        }
+        else {
+            bool hasRoutesOnDate = false;
+            RouteNode* temp = routesFromOrigin;
+            while (temp != nullptr) {
+                if (isDateGreaterOrEqual(temp->departureDate, date)) {
+                    hasRoutesOnDate = true;
+                    break;
+                }
+                temp = temp->next;
+            }
+            
+            if (!hasRoutesOnDate) {
+                errorDetails = "No routes available from " + origin + " on " + date + ". Try different date.";
+            }
+            else {
+                errorDetails = "No connecting route found from " + origin + " to " + destination + 
+                              " on " + date + ". The ports may not be connected.";
+            }
+        }
+        return false;
+    }
 }
 
-void showMap(Maps &graph) {
+
+ //* Global variable to track menu selection
+    int menuSelection = 0; 
+
+    void drawMainMenu(RenderWindow &window, Font &font)
+    {
+        float centerX = 960;
+        Vector2i mousePos = Mouse::getPosition(window);
+        Vector2f mouse(mousePos.x, mousePos.y);
+        Clock blinkClock;
+
+        Text title("OceanRoute Navigator", font, 90);
+        title.setStyle(Text::Bold);
+
+        float t = blinkClock.getElapsedTime().asSeconds();
+
+        title.setFillColor(Color(255, 255, 255, 200 + t * 55));
+
+        FloatRect tb = title.getLocalBounds();
+        title.setOrigin(tb.width / 2, tb.height / 2);
+        title.setPosition(centerX, 180);
+
+        window.draw(title);
+
+        auto makeButton = [&](string txt, float yPos, bool &hovered)
+        {
+            RectangleShape box({500, 110});
+            box.setOrigin(250, 55);
+            box.setPosition(centerX, yPos);
+            box.setFillColor(Color(0, 60, 110, 200));
+            box.setOutlineThickness(4);
+            box.setOutlineColor(Color(100, 200, 255));
+
+            if (box.getGlobalBounds().contains(mouse))
+            {
+                hovered = true;
+                box.setFillColor(Color(0, 120, 200, 220));
+                box.setScale(1.07f, 1.07f);
+            }
+            else
+                hovered = false;
+
+            Text label(txt, font, 48);
+            label.setStyle(Text::Bold);
+            FloatRect lb = label.getLocalBounds();
+            label.setOrigin(lb.width / 2, lb.height / 2);
+            label.setPosition(centerX, yPos - 5);
+
+            window.draw(box);
+            window.draw(label);
+        };
+
+        bool hoverMap = false, hoverBook = false, hoverExit = false;
+
+        makeButton("Show World Map", 420, hoverMap);
+        makeButton("Booking", 570, hoverBook);
+        makeButton("Exit", 720, hoverExit);
+
+        if (Mouse::isButtonPressed(Mouse::Left))
+        {
+            if (hoverMap)
+                menuSelection = 1;
+            if (hoverBook)
+                menuSelection = 2;
+            if (hoverExit)
+                menuSelection = 3;
+        }
+    }
+
+   
+    int openMainMenu(Font &font)
+    {
+        RenderWindow window(VideoMode(1920, 1080), "Main Menu - OceanRoute Navigator");
+
+      
+        Texture bgTexture;
+        if (!bgTexture.loadFromFile("mainmenu.jpg"))
+            cout << "Error loading mainmenu.jpg " << endl;
+
+        Sprite bgSprite;
+        bgSprite.setTexture(bgTexture);
+
+        bgSprite.setScale(
+            1920.0f / bgTexture.getSize().x,
+            1080.0f / bgTexture.getSize().y);
+
+        while (window.isOpen())
+        {
+            Event e;
+            while (window.pollEvent(e))
+            {
+                if (e.type == Event::Closed)
+                    window.close();
+            }
+
+            window.clear();
+
+            window.draw(bgSprite);
+
+            drawMainMenu(window, font);
+
+            window.display();
+
+            if (menuSelection != 0)
+            {
+                int chosen = menuSelection;
+                menuSelection = 0;
+                window.close();
+                return chosen;
+            }
+        }
+        return 3; 
+    }
+
+
+ void showMap(Maps &graph) {
     RenderWindow window(VideoMode(1920, 1080), "OceanRoute Navigator");
     window.setFramerateLimit(60);
     
@@ -359,7 +691,10 @@ void showMap(Maps &graph) {
 
     float animationStartTime = 0.0f;
     bool animationStarted = false;
-
+    Clock clock;
+    bool isAnimating = false;
+    float animationTime = 0.0f;
+    
     RectangleShape searchButton(Vector2f(220, 60));
     searchButton.setFillColor(Color(0, 100, 200, 200));
     searchButton.setOutlineThickness(3);
@@ -379,11 +714,11 @@ void showMap(Maps &graph) {
     searchButtonText.setPosition(55, 895);
 
     bool showInputWindow = false;
-    RectangleShape inputWindow(Vector2f(500, 400));
+    RectangleShape inputWindow(Vector2f(500, 500));
     inputWindow.setFillColor(Color(0, 30, 70, 250));
     inputWindow.setOutlineThickness(4);
     inputWindow.setOutlineColor(Color(100, 200, 255));
-    inputWindow.setPosition(710, 340);
+    inputWindow.setPosition(710, 290);
 
     Text windowTitle;
     windowTitle.setFont(font);
@@ -393,7 +728,7 @@ void showMap(Maps &graph) {
     windowTitle.setStyle(Text::Bold);
     windowTitle.setOutlineThickness(2);
     windowTitle.setOutlineColor(Color(0, 0, 0, 150));
-    windowTitle.setPosition(810, 360);
+    windowTitle.setPosition(810, 310);
 
     class EnhancedInputBox {
     public:
@@ -422,7 +757,7 @@ void showMap(Maps &graph) {
             text.setCharacterSize(20);
             text.setFillColor(Color::White);
             text.setPosition(position.x + 15, position.y + 12);
-            
+
             inputString = "";
             isActive = false;
             time = 0.0f;
@@ -485,15 +820,15 @@ void showMap(Maps &graph) {
         }
     };
 
-    EnhancedInputBox originInput(font, "Departure Port", Vector2f(730, 430));
-    EnhancedInputBox destinationInput(font, "Destination Port", Vector2f(730, 520));
-    EnhancedInputBox dateInput(font, "Date (YYYY-MM-DD)", Vector2f(730, 610));
+    EnhancedInputBox originInput(font, "Departure Port", Vector2f(730, 380));
+    EnhancedInputBox destinationInput(font, "Destination Port", Vector2f(730, 470));
+    EnhancedInputBox dateInput(font, "Date (D/M/YYYY or DD/MM/YYYY)", Vector2f(730, 560));
     
     RectangleShape popupSearchButton(Vector2f(180, 50));
     popupSearchButton.setFillColor(Color(0, 180, 120));
     popupSearchButton.setOutlineThickness(2);
     popupSearchButton.setOutlineColor(Color(100, 255, 180));
-    popupSearchButton.setPosition(750, 690);
+    popupSearchButton.setPosition(750, 640);
     
     Text popupSearchText;
     popupSearchText.setFont(font);
@@ -501,13 +836,13 @@ void showMap(Maps &graph) {
     popupSearchText.setCharacterSize(20);
     popupSearchText.setFillColor(Color::White);
     popupSearchText.setStyle(Text::Bold);
-    popupSearchText.setPosition(780, 702);
+    popupSearchText.setPosition(780, 652);
     
     RectangleShape closeButton(Vector2f(180, 50));
     closeButton.setFillColor(Color(180, 80, 80));
     closeButton.setOutlineThickness(2);
     closeButton.setOutlineColor(Color(255, 150, 150));
-    closeButton.setPosition(950, 690);
+    closeButton.setPosition(950, 640);
     
     Text closeText;
     closeText.setFont(font);
@@ -515,15 +850,15 @@ void showMap(Maps &graph) {
     closeText.setCharacterSize(20);
     closeText.setFillColor(Color::White);
     closeText.setStyle(Text::Bold);
-    closeText.setPosition(985, 702);
+    closeText.setPosition(985, 652);
 
     CircleShape searchButtonGlow(30);
     searchButtonGlow.setFillColor(Color(100, 255, 180, 100));
-    searchButtonGlow.setPosition(745, 685);
+    searchButtonGlow.setPosition(745, 635);
     
     CircleShape closeButtonGlow(30);
     closeButtonGlow.setFillColor(Color(255, 150, 150, 100));
-    closeButtonGlow.setPosition(945, 685);
+    closeButtonGlow.setPosition(945, 635);
 
     int selectedPortIndex = -1;
     RouteNode* hoveredRoute = nullptr;
@@ -532,9 +867,22 @@ void showMap(Maps &graph) {
     Vector<float> portPulse;
     
     Vector<int> currentPath;
+    Vector<string> waitPorts;
+    Vector<string> waitDurations;
+    Vector<RouteNode*> pathRoutes;
+    
+    // Animation variables
+    int currentSegment = 0;
+    float segmentProgress = 0.0f;
+    float animationSpeed = 0.8f; // Speed of animation (0.5 = half speed, 2.0 = double speed)
+    bool isPaused = false;
+    float pauseTimer = 0.0f;
+    const float SEGMENT_PAUSE = 1.5f; // Pause for 1.5 seconds at each port
+    
     bool showSearchResult = false;
     string searchResultText = "";
     Color searchResultColor = Color::White;
+    string errorDetails = "";
     
     Vector<RectangleShape> waterRipples;
     for (int i = 0; i < 20; i++) {
@@ -548,9 +896,44 @@ void showMap(Maps &graph) {
         portPulse.push_back(0.0f);
     }
 
-    // Animation variables
-    float animationTime = 0.0f;
-    const float ANIMATION_DURATION = 8.0f;
+    // Function to find route between two ports
+    auto findRouteBetweenPorts = [&](string fromPort, string toPort) -> RouteNode* {
+        int fromIndex = graph.findPortIndex(fromPort);
+        if (fromIndex == -1) return nullptr;
+        
+        RouteNode* route = graph.ports[fromIndex].routeHead;
+        while (route != nullptr) {
+            if (route->destinationPort == toPort) {
+                return route;
+            }
+            route = route->next;
+        }
+        return nullptr;
+    };
+
+    // Function to get current animation position
+    auto getCurrentPosition = [&]() -> Vector2f {
+        if (currentPath.getSize() < 2 || currentSegment >= currentPath.getSize() - 1) {
+            return Vector2f(0, 0);
+        }
+        
+        int startIdx = currentPath[currentSegment];
+        int endIdx = currentPath[currentSegment + 1];
+        Vector2f start(portLocations[startIdx].x, portLocations[startIdx].y);
+        Vector2f end(portLocations[endIdx].x, portLocations[endIdx].y);
+        
+        return start + (end - start) * segmentProgress;
+    };
+
+    // Function to reset animation
+    auto resetAnimation = [&]() {
+        currentSegment = 0;
+        segmentProgress = 0.0f;
+        isPaused = false;
+        pauseTimer = 0.0f;
+        animationStarted = true;
+        animationStartTime = time;
+    };
 
     while (window.isOpen()) {
         Event event;
@@ -575,6 +958,7 @@ void showMap(Maps &graph) {
                     destinationInput.isActive = false;
                     dateInput.isActive = false;
                     animationTime = 0.0f;
+                    errorDetails = "";
                 }
                 
                 if (showInputWindow) {
@@ -587,23 +971,41 @@ void showMap(Maps &graph) {
                         string destination = destinationInput.getText();
                         string date = dateInput.getText();
                         
+                        currentPath.clear();
+                        waitPorts.clear();
+                        waitDurations.clear();
+                        pathRoutes.clear();
+                        errorDetails = "";
+                        
                         if (origin.empty() || destination.empty() || date.empty()) {
-                            searchResultText = "Please fill all fields!";
+                            searchResultText = "Input Error!";
                             searchResultColor = Color::Red;
+                            errorDetails = "Please fill all fields: Departure Port, Destination Port, and Date.";
                             showSearchResult = true;
                         } else {
-                            bool routeFound = findAndDisplayRoute(graph, origin, destination, date, currentPath, searchResultText, searchResultColor);
+                            bool routeFound = graph.findAndDisplayRoute(origin, destination, date, currentPath, waitPorts, waitDurations, searchResultText, searchResultColor, errorDetails);
                             showSearchResult = true;
                             showRoutes = true;
-                            showInputWindow = false;
-                            // Reset animation
-                            animationStarted = true;
-                            animationStartTime = time; 
+                            
+                            if (routeFound) {
+                                // Build path routes for connecting routes
+                                pathRoutes.clear();
+                                for (int i = 0; i < currentPath.getSize() - 1; i++) {
+                                    string fromPort = portLocations[currentPath[i]].name;
+                                    string toPort = portLocations[currentPath[i + 1]].name;
+                                    RouteNode* route = findRouteBetweenPorts(fromPort, toPort);
+                                    if (route != nullptr) {
+                                        pathRoutes.push_back(route);
+                                    }
+                                }
+                                resetAnimation();
+                            }
                         }
                     }
                     if (closeButton.getGlobalBounds().contains(mousePos)) {
                         showInputWindow = false;
                         showSearchResult = false;
+                        errorDetails = "";
                     }
                 }
                 
@@ -617,8 +1019,8 @@ void showMap(Maps &graph) {
                             showRoutes = true;
                             portPulse[i] = 1.0f;
                             showSearchResult = false;
-                            currentPath.clear();
                             animationTime = 0.0f;
+                            errorDetails = "";
                         }
                     }
                 }
@@ -634,13 +1036,14 @@ void showMap(Maps &graph) {
                 if (showInputWindow) {
                     showInputWindow = false;
                     showSearchResult = false;
+                    errorDetails = "";
                 } else {
                     selectedPortIndex = -1;
                     showRoutes = false;
                     hoveredRoute = nullptr;
                     showSearchResult = false;
-                    currentPath.clear();
                     animationTime = 0.0f;
+                    errorDetails = "";
                 }
             }
             
@@ -686,82 +1089,237 @@ void showMap(Maps &graph) {
         }
         window.draw(mapSprite);
 
-   if (showSearchResult && currentPath.getSize() > 1) {
-    // Compute total path length
-    float totalLength = 0.0f;
-    Vector<float> segmentLengths;
-    for (int i = 0; i < currentPath.getSize() - 1; i++) {
-        int startIdx = currentPath[i];
-        int endIdx = currentPath[i + 1];
-        Vector2f start(portLocations[startIdx].x, portLocations[startIdx].y);
-        Vector2f end(portLocations[endIdx].x, portLocations[endIdx].y);
-        float len = sqrt(pow(end.x - start.x, 2) + pow(end.y - start.y, 2));
-        segmentLengths.push_back(len);
-        totalLength += len;
-    }
+        // BEAUTIFUL ROUTE ANIMATION
+        if (currentPath.getSize() > 1 && animationStarted) {
+            // Update animation
+            if (!isPaused) {
+                segmentProgress += deltaTime * animationSpeed;
+                
+                // Check if we reached the end of current segment
+                if (segmentProgress >= 1.0f) {
+                    segmentProgress = 1.0f;
+                    isPaused = true;
+                    pauseTimer = 0.0f;
+                }
+            } else {
+                // We're paused at a port
+                pauseTimer += deltaTime;
+                if (pauseTimer >= SEGMENT_PAUSE) {
+                    // Move to next segment
+                    currentSegment++;
+                    segmentProgress = 0.0f;
+                    isPaused = false;
+                    
+                    // Check if we reached the final destination
+                    if (currentSegment >= currentPath.getSize() - 1) {
+                        resetAnimation();
+                    }
+                }
+            }
 
-    float speed = 200.0f; 
-    float traveled = 0.0f;
-    
-    if (animationStarted) {
-        traveled = (time - animationStartTime) * speed;
-    }
-
-    // Draw lines and glow
-    for (int i = 0; i < currentPath.getSize() - 1; i++) {
-        int startIdx = currentPath[i];
-        int endIdx = currentPath[i + 1];
-        Vector2f start(portLocations[startIdx].x, portLocations[startIdx].y);
-        Vector2f end(portLocations[endIdx].x, portLocations[endIdx].y);
-
-        float angle = atan2(end.y - start.y, end.x - start.x) * 180 / 3.14159f;
-        float length = segmentLengths[i];
-
-        RectangleShape routeLine(Vector2f(length, 5.0f));
-        routeLine.setPosition(start);
-        routeLine.setRotation(angle);
-        routeLine.setFillColor(Color::Cyan);
-        window.draw(routeLine);
-
-        RectangleShape glowLine(Vector2f(length, 10.0f));
-        glowLine.setPosition(start);
-        glowLine.setRotation(angle);
-        glowLine.setFillColor(Color(0, 255, 255, 80));
-        window.draw(glowLine);
-    }
-
-    // Only draw dot if it hasn't reached destination yet
-    if (traveled < totalLength) {
-        Vector2f dotPos;
-        float remaining = traveled;
-        
-        for (int i = 0; i < currentPath.getSize() - 1; i++) {
-            if (remaining <= segmentLengths[i]) {
+            // Draw all route segments
+            for (int i = 0; i < currentPath.getSize() - 1; i++) {
                 int startIdx = currentPath[i];
                 int endIdx = currentPath[i + 1];
                 Vector2f start(portLocations[startIdx].x, portLocations[startIdx].y);
                 Vector2f end(portLocations[endIdx].x, portLocations[endIdx].y);
 
-                float t = remaining / segmentLengths[i];
-                dotPos = start + (end - start) * t;
-                break;
+                float length = sqrt(pow(end.x - start.x, 2) + pow(end.y - start.y, 2));
+                float angle = atan2(end.y - start.y, end.x - start.x) * 180 / 3.14159f;
+
+                if (i == currentSegment) {
+                    float currentLength = length * segmentProgress;
+                    
+                    RectangleShape currentLine(Vector2f(currentLength, 6.0f));
+                    currentLine.setPosition(start);
+                    currentLine.setRotation(angle);
+                    currentLine.setFillColor(Color::Cyan);
+                    window.draw(currentLine);
+                    
+                    RectangleShape currentGlow(Vector2f(currentLength, 12.0f));
+                    currentGlow.setPosition(start);
+                    currentGlow.setRotation(angle);
+                    currentGlow.setFillColor(Color(0, 255, 255, 100));
+                    window.draw(currentGlow);
+                    
+                    Vector2f currentPos = start + (end - start) * segmentProgress;
+                    float pulse = 0.7f + 0.3f * sin(time * 8.0f);
+                    
+                    CircleShape endGlow(15.f * pulse);
+                    endGlow.setFillColor(Color(0, 255, 255, 150));
+                    endGlow.setOrigin(15.f * pulse, 15.f * pulse);
+                    endGlow.setPosition(currentPos);
+                    window.draw(endGlow);
+                    
+                    CircleShape endDot(8.f);
+                    endDot.setFillColor(Color::Yellow);
+                    endDot.setOutlineColor(Color::White);
+                    endDot.setOutlineThickness(2);
+                    endDot.setOrigin(8.f, 8.f);
+                    endDot.setPosition(currentPos);
+                    window.draw(endDot);
+                    
+                    if (segmentProgress < 1.0f) {
+                        float remainingLength = length * (1.0f - segmentProgress);
+                        Vector2f remainingStart = currentPos;
+                        
+                        RectangleShape remainingLine(Vector2f(remainingLength, 4.0f));
+                        remainingLine.setPosition(remainingStart);
+                        remainingLine.setRotation(angle);
+                        remainingLine.setFillColor(Color(0, 150, 150, 150));
+                        window.draw(remainingLine);
+                    }
+                } 
+                else if (i < currentSegment) {
+                    RectangleShape completedLine(Vector2f(length, 5.0f));
+                    completedLine.setPosition(start);
+                    completedLine.setRotation(angle);
+                    completedLine.setFillColor(Color(0, 200, 200));
+                    window.draw(completedLine);
+                }
+                else {
+                    RectangleShape upcomingLine(Vector2f(length, 3.0f));
+                    upcomingLine.setPosition(start);
+                    upcomingLine.setRotation(angle);
+                    upcomingLine.setFillColor(Color(0, 100, 100, 100));
+                    window.draw(upcomingLine);
+                }
             }
-            remaining -= segmentLengths[i];
+
+            // Draw port connection effects
+            for (int i = 0; i < currentPath.getSize(); i++) {
+                int portIdx = currentPath[i];
+                Vector2f portPos(portLocations[portIdx].x, portLocations[portIdx].y);
+                
+                if (isPaused && i == currentSegment + 1) {
+                    float pausePulse = 0.5f + 0.5f * sin(pauseTimer * 6.0f);
+                    
+                    // Connection glow
+                    CircleShape connectionGlow(25.f * pausePulse);
+                    connectionGlow.setFillColor(Color(255, 255, 0, 100));
+                    connectionGlow.setOrigin(25.f * pausePulse, 25.f * pausePulse);
+                    connectionGlow.setPosition(portPos);
+                    window.draw(connectionGlow);
+                    
+                    // Port highlight
+                    CircleShape portHighlight(12.f);
+                    portHighlight.setFillColor(Color::Yellow);
+                    portHighlight.setOutlineColor(Color::White);
+                    portHighlight.setOutlineThickness(3);
+                    portHighlight.setOrigin(12.f, 12.f);
+                    portHighlight.setPosition(portPos);
+                    window.draw(portHighlight);
+                    
+                    // Connection text
+                    RectangleShape textBox(Vector2f(200, 60));
+                    textBox.setFillColor(Color(0, 0, 0, 200));
+                    textBox.setOutlineThickness(2);
+                    textBox.setOutlineColor(Color::Yellow);
+                    textBox.setPosition(portPos.x - 100, portPos.y - 80);
+                    window.draw(textBox);
+                    
+                    Text connectionText;
+                    connectionText.setFont(font);
+                    connectionText.setString("Connected to\n" + portLocations[portIdx].name);
+                    connectionText.setCharacterSize(14);
+                    connectionText.setFillColor(Color::Yellow);
+                    connectionText.setPosition(portPos.x - 90, portPos.y - 75);
+                    window.draw(connectionText);
+                }
+            }
+
+            float pulse = 0.5f + 0.5f * sin(time * 3.0f);
+            float alpha = 150 + 105 * pulse;
+            
+            RectangleShape routeInfoBox(Vector2f(450, 140));
+            routeInfoBox.setFillColor(Color(0, 30, 60, 200));
+            routeInfoBox.setOutlineThickness(3);
+            routeInfoBox.setOutlineColor(Color(100, 200, 255, alpha));
+            routeInfoBox.setPosition(250, 920);
+            window.draw(routeInfoBox);
+
+            // Animated progress bar
+            float totalSegments = currentPath.getSize() - 1;
+            float progress = (currentSegment + segmentProgress) / totalSegments;
+            
+            RectangleShape progressBg(Vector2f(430, 8));
+            progressBg.setFillColor(Color(0, 50, 100));
+            progressBg.setPosition(260, 1020);
+            window.draw(progressBg);
+            
+            RectangleShape progressBar(Vector2f(430 * progress, 8));
+            progressBar.setFillColor(Color(100, 255, 255));
+            progressBar.setPosition(260, 1020);
+            window.draw(progressBar);
+
+            Text routeTitle;
+            routeTitle.setFont(font);
+            routeTitle.setString("ACTIVE ROUTE - " + to_string(int(progress * 100)) + "% Complete");
+            routeTitle.setCharacterSize(18);
+            routeTitle.setFillColor(Color(100, 255, 255));
+            routeTitle.setStyle(Text::Bold);
+            routeTitle.setPosition(260, 730);
+            window.draw(routeTitle);
+
+            string pathStr = "";
+            for (int i = 0; i < currentPath.getSize(); i++) {
+                if (i == currentSegment + 1 && isPaused) {
+                    pathStr += "[" + portLocations[currentPath[i]].name + "]";
+                } else {
+                    pathStr += portLocations[currentPath[i]].name;
+                }
+                if (i < currentPath.getSize() - 1) pathStr += " → ";
+            }
+            
+            Text pathText;
+            pathText.setFont(font);
+            pathText.setString(pathStr);
+            pathText.setCharacterSize(16);
+            pathText.setFillColor(Color::White);
+            pathText.setPosition(260, 960);
+            window.draw(pathText);
+
+            if (waitPorts.getSize() > 0) {
+                Text waitText;
+                waitText.setFont(font);
+                waitText.setString("Wait Points: " + to_string(waitPorts.getSize()));
+                waitText.setCharacterSize(14);
+                waitText.setFillColor(Color::Yellow);
+                waitText.setPosition(260, 745);
+                window.draw(waitText);
+            }
+
+            CircleShape animDot(4.f);
+            animDot.setFillColor(Color(100, 255, 255, alpha));
+            animDot.setPosition(240, 940);
+            window.draw(animDot);
         }
 
-        // Draw the moving dot
-        CircleShape routeDot(8.f);
-        routeDot.setFillColor(Color::Yellow);
-        routeDot.setOutlineColor(Color::White);
-        routeDot.setOutlineThickness(2);
-        routeDot.setOrigin(8, 8);
-        routeDot.setPosition(dotPos);
-        window.draw(routeDot);
-    }
-}
+        hoveredRoute = nullptr;
+        if (currentPath.getSize() > 1) {
+            for (int i = 0; i < currentPath.getSize() - 1; i++) {
+                Vector2f start(portLocations[currentPath[i]].x, portLocations[currentPath[i]].y);
+                Vector2f end(portLocations[currentPath[i + 1]].x, portLocations[currentPath[i + 1]].y);
+                
+                float length = sqrt(pow(end.x - start.x, 2) + pow(end.y - start.y, 2));
+                
+                float lineLength = length;
+                Vector2f lineDir = (end - start) / lineLength;
+                Vector2f toMouse = mousePos - start;
+                float projection = toMouse.x * lineDir.x + toMouse.y * lineDir.y;
+                projection = max(0.0f, min(lineLength, projection));
+                Vector2f closestPoint = start + lineDir * projection;
+                
+                float distance = sqrt(pow(mousePos.x - closestPoint.x, 2) + pow(mousePos.y - closestPoint.y, 2));
+                
+                if (distance < 15.0f && i < pathRoutes.getSize()) {
+                    hoveredRoute = pathRoutes[i];
+                    break;
+                }
+            }
+        }
 
         if (showRoutes && selectedPortIndex != -1 && !showSearchResult) {
-            hoveredRoute = nullptr;
             RouteNode* route = graph.ports[selectedPortIndex].routeHead;
             int routeIndex = 0;
             
@@ -805,7 +1363,9 @@ void showMap(Maps &graph) {
                     
                     float distance = abs((end.y - start.y) * mousePos.x - (end.x - start.x) * mousePos.y + end.x * start.y - end.y * start.x) 
                                      / sqrt(pow(end.y - start.y, 2) + pow(end.x - start.x, 2));
-                    if (distance < 20.0f) hoveredRoute = route;
+                    if (distance < 20.0f && hoveredRoute == nullptr) {
+                        hoveredRoute = route;
+                    }
                 }
                 route = route->next;
                 routeIndex++;
@@ -823,7 +1383,7 @@ void showMap(Maps &graph) {
             CircleShape dot(8.f * pulseScale);
             dot.setOrigin(8.f * pulseScale, 8.f * pulseScale);
             
-            if (showSearchResult && currentPath.getSize() > 0) {
+            if (currentPath.getSize() > 0) {
                 bool inPath = false;
                 for (int j = 0; j < currentPath.getSize(); j++) {
                     if (currentPath[j] == i) {
@@ -856,7 +1416,8 @@ void showMap(Maps &graph) {
             window.draw(dot);
         }
 
-        if (selectedPortIndex != -1 || showSearchResult) {
+        // DRAW PORT LABELS (same as before)
+        if (selectedPortIndex != -1 || currentPath.getSize() > 0) {
             auto drawLabel = [&](int idx, Color fillColor, unsigned int size, float alpha = 255.0f) {
                 Text label;
                 label.setFont(font);
@@ -887,7 +1448,7 @@ void showMap(Maps &graph) {
                 }
             }
             
-            if (showSearchResult && currentPath.getSize() > 0) {
+            if (currentPath.getSize() > 0) {
                 for (int i = 0; i < currentPath.getSize(); i++) {
                     drawLabel(currentPath[i], Color::Cyan, 16);
                 }
@@ -956,56 +1517,37 @@ void showMap(Maps &graph) {
                 Text resultText;
                 resultText.setFont(font);
                 resultText.setString(searchResultText);
-                resultText.setCharacterSize(18);
+                resultText.setCharacterSize(20);
                 resultText.setFillColor(searchResultColor);
                 resultText.setStyle(Text::Bold);
                 resultText.setOutlineThickness(1);
                 resultText.setOutlineColor(Color(0, 0, 0, 150));
-                resultText.setPosition(750, 750);
+                resultText.setPosition(750, 700);
                 window.draw(resultText);
-            }
-        }
-
-        if (showSearchResult && !showInputWindow) {
-            Text resultText;
-            resultText.setFont(font);
-            resultText.setString(searchResultText);
-            resultText.setCharacterSize(20);
-            resultText.setFillColor(searchResultColor);
-            resultText.setStyle(Text::Bold);
-            resultText.setOutlineThickness(1);
-            resultText.setOutlineColor(Color(0, 0, 0, 150));
-            resultText.setPosition(250, 990);
-            window.draw(resultText);
-            
-            if (currentPath.getSize() > 0 && searchResultColor == Color::Green) {
-                string pathStr = "Route: ";
-                for (int i = 0; i < currentPath.getSize(); i++) {
-                    pathStr += portLocations[currentPath[i]].name;
-                    if (i < currentPath.getSize() - 1) pathStr += " → ";
-                }
                 
-                Text pathText;
-                pathText.setFont(font);
-                pathText.setString(pathStr);
-                pathText.setCharacterSize(16);
-                pathText.setFillColor(Color::Cyan);
-                pathText.setStyle(Text::Bold);
-                pathText.setPosition(250, 1020);
-                window.draw(pathText);
+                if (!errorDetails.empty()) {
+                    Text detailsText;
+                    detailsText.setFont(font);
+                    detailsText.setString(errorDetails);
+                    detailsText.setCharacterSize(16);
+                    detailsText.setFillColor(searchResultColor == Color::Green ? Color::Cyan : Color::Yellow);
+                    detailsText.setStyle(Text::Bold);
+                    detailsText.setPosition(730, 730);
+                    window.draw(detailsText);
+                }
             }
         }
 
         if (hoveredRoute != nullptr && !showInputWindow) {
-            float boxWidth = 400.f, boxHeight = 180.f;
+            float boxWidth = 420.f, boxHeight = 220.f;
             float boxX = mousePos.x + 20.f;
-            float boxY = mousePos.y - 160.f;
+            float boxY = mousePos.y - 200.f;
             if (boxX + boxWidth > 1920) boxX = 1920 - boxWidth - 20;
             if (boxY < 0) boxY = 20;
 
             RectangleShape infoBox(Vector2f(boxWidth, boxHeight));
             infoBox.setFillColor(Color(0, 20, 60, 240));
-            infoBox.setOutlineThickness(2.f);
+            infoBox.setOutlineThickness(3.f);
             infoBox.setOutlineColor(Color(100, 200, 255));
             infoBox.setPosition(boxX, boxY);
             
@@ -1023,18 +1565,28 @@ void showMap(Maps &graph) {
             window.draw(gradient);
             window.draw(infoBox);
 
+            Text header;
+            header.setFont(font);
+            header.setString("ROUTE DETAILS");
+            header.setCharacterSize(18);
+            header.setFillColor(Color(100, 255, 255));
+            header.setStyle(Text::Bold);
+            header.setPosition(boxX + 15.f, boxY + 10.f);
+            window.draw(header);
+
             Text details;
             details.setFont(font);
             details.setCharacterSize(16);
             details.setFillColor(Color(200, 230, 255));
             details.setStyle(Text::Bold);
-            details.setPosition(boxX + 15.f, boxY + 15.f);
+            details.setPosition(boxX + 15.f, boxY + 40.f);
 
             string infoText = "From: " + hoveredRoute->startingPort + "\n" +
                               "To: " + hoveredRoute->destinationPort + "\n" +
                               "Cost: $" + to_string(hoveredRoute->cost) + "\n" +
                               "Date: " + hoveredRoute->departureDate + "\n" +
-                              "Time: " + hoveredRoute->departureTime + " - " + hoveredRoute->arrivalTime + "\n" +
+                              "Departure: " + hoveredRoute->departureTime + "\n" +
+                              "Arrival: " + hoveredRoute->arrivalTime + "\n" +
                               "Company: " + hoveredRoute->shippingCompany;
 
             details.setString(infoText);
@@ -1046,6 +1598,7 @@ void showMap(Maps &graph) {
             infoBox.setOutlineColor(Color(100, 200, 255, 150 + 105 * pulseValue));
         }
 
+        // TITLE AND LEGEND
         Text title;
         title.setFont(font);
         title.setString("OceanRoute Navigator");
@@ -1115,7 +1668,21 @@ int main()
 {
     Maps graph = readPorts("PortCharges.txt");
     addRoutesFromFile(graph, "Routes.txt");
-    graph.showMap(graph);
-   
+    Font font;
+    font.loadFromFile("Roboto.ttf");
+
+    while (true)
+    {
+        int choice = graph.openMainMenu(font);
+
+        if (choice == 1)
+            graph.showMap(graph);
+
+        else if (choice == 2)
+            cout << "Booking system coming soon... " << endl;
+
+        else if (choice == 3)
+            break;
+    }
     return 0;
 }

@@ -5,14 +5,22 @@
 #include "Vector.h" 
 using namespace std;
 
+struct PathWithDate {
+    Vector<int> path;
+    string currentDate; 
+    string currentTime; 
+    Vector<string> waitPorts;   
+    Vector<string> waitDurations; 
+};
+
 struct QueueNode
 {
-    Vector<int> path; // har node me current path store hoga
+    PathWithDate data; 
     QueueNode *next;
 
-    QueueNode(Vector<int> p)
+    QueueNode(PathWithDate p)
     {
-        path = p;
+        data = p;
         next = nullptr;
     }
 };
@@ -36,7 +44,7 @@ public:
         return front == nullptr;
     }
 
-    void enqueue(Vector<int> p)
+    void enqueue(PathWithDate p)
     {
         QueueNode *newNode = new QueueNode(p);
 
@@ -52,16 +60,22 @@ public:
         count++;
     }
 
-    Vector<int> dequeue()
+    PathWithDate dequeue()
     {
         if (isEmpty())
         {
             cout << "Queue Underflow! Cannot dequeue." << endl;
-            return Vector<int>(); // empty vector
+            PathWithDate empty;
+            empty.path = Vector<int>();
+            empty.currentDate = "";
+            empty.currentTime = "";
+            empty.waitPorts = Vector<string>();
+            empty.waitDurations = Vector<string>();
+            return empty;
         }
 
         QueueNode *temp = front;
-        Vector<int> returnValue = temp->path;
+        PathWithDate returnValue = temp->data;
 
         front = front->next;
         if (front == nullptr)
@@ -72,14 +86,20 @@ public:
         return returnValue;
     }
 
-    Vector<int> frontfind()
+    PathWithDate frontfind()
     {
         if (isEmpty())
         {
             cout << "Queue is empty!" << endl;
-            return Vector<int>(); // empty vector
+            PathWithDate empty;
+            empty.path = Vector<int>();
+            empty.currentDate = "";
+            empty.currentTime = "";
+            empty.waitPorts = Vector<string>();
+            empty.waitDurations = Vector<string>();
+            return empty;
         }
-        return front->path;
+        return front->data;
     }
 
     ~Queue()
